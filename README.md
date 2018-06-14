@@ -2,10 +2,10 @@
 
 ## 简介：
 
-* 1、从全局上了解flask项目的目录结构
+* 1、
 
-* 2、flask项目的运行机制
+* 2、
 
-* 3、flask框架实现MVC架构
+* 3、
 
-* 4、flask-sqlalchemy 操作mysql数据库
+* 4、
