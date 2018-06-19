@@ -1,21 +1,14 @@
 # -*- coding: utf-8 -*-
-from datetime import datetime
+import bleach
 import hashlib
+from markdown import markdown
+from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 from itsdangerous import TimedJSONWebSignatureSerializer as Serializer
 from flask import current_app, request, url_for
 from flask_login import UserMixin, AnonymousUserMixin
 from app.exceptions import ValidationError
-from markdown import markdown
-import bleach
-from . import db
-from . import login_manager
-
-# 用户角色
-# 匿名: 0x00    未登录的用户。在程序中只有阅读权限
-# 用户: 0x07    具有发布文章、发表评论和关注其他用户的权限。这是新用户的默认角色
-# 协管员: 0x0f  增加审查不当评论的权限
-# 管理员: 0xff  具有所有权限，包括修改其他用户所属角色的权限
+from . import db, login_manager
 
 
 # 权限常量
@@ -25,6 +18,7 @@ class Permission:
     WRITE = 4
     MODERATE = 8
     ADMIN = 16
+
 
 class Role(db.Model):
     __tablename__ = 'roles'
@@ -43,9 +37,11 @@ class Role(db.Model):
     def insert_roles():
         roles = {
             'User': [Permission.FOLLOW, Permission.COMMENT, Permission.WRITE],
-            'Moderator': [Permission.FOLLOW, Permission.COMMENT, Permission.WRITE, Permission.MODERATE],
-            'Administrator': [Permission.FOLLOW, Permission.COMMENT,Permission.WRITE, 
-                              Permission.MODERATE, Permission.ADMIN],
+            'Moderator': [Permission.FOLLOW, Permission.COMMENT, 
+                            Permission.WRITE, Permission.MODERATE],
+            'Administrator': [Permission.FOLLOW, Permission.COMMENT,
+                            Permission.WRITE, Permission.MODERATE, 
+                            Permission.ADMIN],
         }
         default_role = 'User'
         for r in roles:
@@ -104,7 +100,6 @@ class User(UserMixin, db.Model):
 
     posts = db.relationship('Post', backref='author', lazy='dynamic')
     comments = db.relationship('Comment', backref='author', lazy='dynamic')
-
     followed = db.relationship('Follow', foreign_keys=[Follow.follower_id],
                                 backref=db.backref('follower', lazy='joined'),
                                 lazy='dynamic',
@@ -113,14 +108,6 @@ class User(UserMixin, db.Model):
                                 backref=db.backref('followed', lazy='joined'),
                                 lazy='dynamic',
                                 cascade='all, delete-orphan')
-
-    @staticmethod
-    def add_self_follows():
-        for user in User.query.all():
-            if not user.is_following(user):
-                user.follow(user)
-                db.session.add(user)
-                db.session.commit()
 
     def __init__(self, **kwargs):
         super(User, self).__init__(**kwargs)
@@ -132,6 +119,14 @@ class User(UserMixin, db.Model):
         if self.email is not None and self.avatar_hash is None:
             self.avatar_hash = self.gravatar_hash()
         self.follow(self)
+
+    @staticmethod
+    def add_self_follows():
+        for user in User.query.all():
+            if not user.is_following(user):
+                user.follow(user)
+                db.session.add(user)
+                db.session.commit()
 
     @property
     def password(self):
@@ -148,8 +143,13 @@ class User(UserMixin, db.Model):
     def generate_confirmation_token(self, expiration=3600):
         s = Serializer(current_app.config['SECRET_KEY'], expiration)
         return s.dumps({'confirm': self.id}).decode('utf-8')
+
+    # 重置token
+    def generate_reset_token(self, expiration=3600):
+        s = Serializer(current_app.config['SECRET_KEY'], expiration)
+        return s.dumps({'reset': self.id}).decode('utf-8')
     
-    # 检验令牌， 检验通过，则把新的confirm 属性设为True
+    # 检验令牌，检验通过，则把新的confirm 属性设为True
     def confirm(self, token):
         s = Serializer(current_app.config['SECRET_KEY'])
         try:
@@ -162,11 +162,6 @@ class User(UserMixin, db.Model):
         db.session.add(self)
         # db.session.commit()
         return True
-
-    # 重置token
-    def generate_reset_token(self, expiration=3600):
-        s = Serializer(current_app.config['SECRET_KEY'], expiration)
-        return s.dumps({'reset': self.id}).decode('utf-8')
 
     @staticmethod
     def reset_password(token, new_password):
@@ -224,19 +219,6 @@ class User(UserMixin, db.Model):
         return '{url}/{hash}?s={size}&d={default}&r={rating}'.format(
             url=url, hash=hash, size=size, default=default, rating=rating)
 
-    def generate_auth_token(self, expiration):
-        s = Serializer(current_app.config['SECRET_KEY'], expires_in=expiration)
-        return s.dumps({'id': self.id}).decode('utf-8')
-
-    @staticmethod
-    def verify_auth_token(token):
-        s = Serializer(current_app.config['SECRET_KEY'])
-        try:
-            data = s.load(token)
-        except:
-            return None
-        return User.query.get(data['id'])
-
     # A 关注B
     def follow(self, user):
         if not self.is_following(user):
@@ -251,18 +233,48 @@ class User(UserMixin, db.Model):
 
     # A 是否关注了 B
     def is_following(self, user):
+        if user.id is None:
+            return False
         return self.followed.filter_by(
             followed_id=user.id).first() is not None
 
     # A 是否被 B 粉了
     def is_followed_by(self, user):
+        if user.id is None:
+            return False
         return self.followers.filter_by(
             follower_id=user.id).first() is not None
-    
+
     @property
     def followed_posts(self):
         return Post.query.join(Follow, Follow.followed_id==Post.author_id)\
-            .filter(Follow.followed_id==self.id)
+            .filter(Follow.follower_id==self.id)
+
+    def to_json(self):
+        json_user = {
+            'url': url_for('api.get_user', id=self.id, _external=True),
+            'username': self.username,
+            'member_since': self.member_since,
+            'last_seen': self.last_seen,
+            'posts_url': url_for('api.get_user_posts', id=self.id, _external=True),
+            'followed_posts_url': url_for('api.get_user_followed_posts', 
+                                        id=self.id, _external=True),
+            'post_count': self.posts.count()}
+        return json_user
+
+    def generate_auth_token(self, expiration):
+        s = Serializer(current_app.config['SECRET_KEY'], 
+                        expires_in=expiration)
+        return s.dumps({'id': self.id}).decode('utf-8')
+
+    @staticmethod
+    def verify_auth_token(token):
+        s = Serializer(current_app.config['SECRET_KEY'])
+        try:
+            data = s.load(token.encode('utf-8'))
+        except:
+            return None
+        return User.query.get(data.get('id'))
 
     def __repr__(self):
         return '<User %r>' % self.username
@@ -275,7 +287,9 @@ class AnonymousUser(AnonymousUserMixin):
     def is_administrator(self):
         return False
 
+
 login_manager.anonymous_user = AnonymousUser
+
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -301,6 +315,26 @@ class Post(db.Model):
             markdown(value, output_format='html'),
             tags=allowed_tags, strip=True))
 
+    def to_json(self):
+        json_post = {
+            'url': url_for('api.get_post', id=self.id, _external=True),
+            'content': self.content,
+            'content_html': self.content_html,
+            'timestamp': self.timestamp,
+            'author_url': url_for('api.get_user', id=self.author.id, _external=True),
+            'comments_url': url_for('api.get_post_comments', id=self.id, _external=True),
+            'comment_count': self.comments.count()
+        }
+        return json_post
+
+    @staticmethod
+    def from_json(json_post):
+        content = json_post.get('body')
+        if  content is None or content == '':
+            raise ValidationError('post does not have a body')
+        return Post(content=content)
+
+
 db.event.listen(Post.content, 'set', Post.on_change_content)
 
 
@@ -311,6 +345,7 @@ class Comment(db.Model):
     body_html = db.Column(db.Text)
     timestamp = db.Column(db.DateTime, index=True, default=datetime.utcnow)
     disabled = db.Column(db.Boolean)
+
     author_id = db.Column(db.Integer, db.ForeignKey('users.id'))
     post_id = db.Column(db.Integer, db.ForeignKey('posts.id'))
 
@@ -320,5 +355,23 @@ class Comment(db.Model):
         target.body_html = bleach.linkify(bleach.clean(
             markdown(value, output_format='html'),
             tags=allowed_tags, strip=True))
+
+    def to_json(self):
+        json_comment = {
+            'url': url_for('api.get_comment', id=self.id),
+            'post_url': url_for('api.get_post', id=self.post_id),
+            'body': self.body,
+            'body_html': self.body_html,
+            'timestamp': self.timestamp,
+            'author_url':url_for('api.get_user', id=self.author_id)
+        }
+
+    @staticmethod
+    def from_json(json_comment):
+        body = json_comment.get('body')
+        if body is None or body == '':
+            raise ValidationError('comment does not have a body')
+        return Comment(body=body)
+
 
 db.event.listen(Comment.body, 'set', Comment.on_change_body)

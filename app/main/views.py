@@ -11,6 +11,7 @@ from .. import db
 from ..models import Permission, User, Post, Comment
 from ..decorators import admin_required, permission_required
 
+
 # 检查必填参数
 def require(*required_args):
     def decorator(func):
@@ -22,6 +23,7 @@ def require(*required_args):
             return func(*args, **kw)
         return wrapper
     return decorator()
+
 
 def allow_cross_domain(fun):
     @wraps(fun)

@@ -34,6 +34,9 @@ class DevelopmentConfig(Config):
 # 测试环境
 class TestingConfig(Config):
     TESTING = True
+    DEBUG = False
+    WTF_CSRF_ENABLED = False
+
 
 
 # 生产环境
